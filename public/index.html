@@ -200,6 +200,10 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--bg);colo
     <div class="hdr-title">SIM Manager</div>
     <div class="hdr-div"></div>
     <div class="pill">📱 <span id="hdrCount">—</span></div>
+    <div class="pill" id="syncPill" style="display:none">
+      <span id="syncDot" style="width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0;display:inline-block"></span>
+      <span id="syncLabel">Sincronizzato</span>
+    </div>
     <div class="hdr-right">
       <button class="btn btn-ghost btn-sm" onclick="openView('settings')">⚙️</button>
       <button class="btn btn-ghost btn-sm" onclick="lockApp()">🔒</button>
@@ -349,10 +353,81 @@ let editPersonId = null, selectedColor = '#2563eb', selectedEmoji = '👤';
 // ── STORAGE ──
 const ls = (k,d='') => { try{return localStorage.getItem('sm_'+k)??d;}catch{return d;} };
 const ss = (k,v) => { try{localStorage.setItem('sm_'+k,v);}catch{} };
-const loadSims = () => { try{sims=JSON.parse(ls('sims','[]'));}catch{sims=[];} };
-const saveSims = () => ss('sims', JSON.stringify(sims));
-const loadPeople = () => { try{people=JSON.parse(ls('people','[]'));}catch{people=[];} };
-const savePeople = () => ss('people', JSON.stringify(people));
+
+// Sync stato
+let syncing = false;
+let syncTimeout = null;
+
+function setSyncStatus(status) {
+  const dot = document.getElementById('syncDot');
+  const lbl = document.getElementById('syncLabel');
+  const pill = document.getElementById('syncPill');
+  if(pill) pill.style.display='flex';
+  if(status==='syncing'){
+    if(dot){dot.style.background='var(--amber)';}
+    if(lbl) lbl.textContent='Salvataggio…';
+  } else if(status==='ok'){
+    if(dot){dot.style.background='var(--green)';}
+    if(lbl) lbl.textContent='Sincronizzato';
+  } else if(status==='offline'){
+    if(dot){dot.style.background='var(--text3)';}
+    if(lbl) lbl.textContent='Offline (locale)';
+  } else if(status==='error'){
+    if(dot){dot.style.background='var(--red)';}
+    if(lbl) lbl.textContent='Errore sync';
+  }
+}
+
+// Carica da server, fallback a localStorage
+async function loadData() {
+  try {
+    const res = await fetch('/api/data');
+    if(res.ok) {
+      const data = await res.json();
+      people = data.people || [];
+      sims = data.sims || [];
+      // salva anche in locale come cache
+      ss('people', JSON.stringify(people));
+      ss('sims', JSON.stringify(sims));
+      setSyncStatus('ok');
+      return true;
+    }
+  } catch(e) {}
+  // fallback locale
+  try{ people=JSON.parse(ls('people','[]')); }catch{ people=[]; }
+  try{ sims=JSON.parse(ls('sims','[]')); }catch{ sims=[]; }
+  setSyncStatus('offline');
+  return false;
+}
+
+// Salva su server (debounced 800ms)
+function saveData() {
+  // salva subito in locale
+  ss('people', JSON.stringify(people));
+  ss('sims', JSON.stringify(sims));
+  // poi sincronizza con il server
+  if(syncTimeout) clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(async () => {
+    setSyncStatus('syncing');
+    try {
+      const res = await fetch('/api/data', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({people, sims})
+      });
+      if(res.ok) setSyncStatus('ok');
+      else setSyncStatus('error');
+    } catch(e) {
+      setSyncStatus('offline');
+    }
+  }, 800);
+}
+
+// Compatibilità con le chiamate esistenti
+const loadSims = () => {};
+const saveSims = () => saveData();
+const loadPeople = () => {};
+const savePeople = () => saveData();
 
 // colore chiaro da colore scuro
 function lightBg(hex) {
@@ -432,11 +507,15 @@ function handleSetup() {
     else { updateDots(4,'err'); document.getElementById('pinMsg').textContent='I PIN non corrispondono'; setTimeout(()=>startPinSetup(),900); }
   }
 }
-function enterApp() {
-  loadPeople(); loadSims();
-  if(!people.length) seedDemo();
+async function enterApp() {
   document.getElementById('pinScreen').style.display='none';
   document.getElementById('app').classList.add('show');
+  setSyncStatus('syncing');
+  await loadData();
+  if(!people.length) {
+    seedDemo();
+    saveData();
+  }
   render();
 }
 function lockApp() {
